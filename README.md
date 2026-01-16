@@ -238,7 +238,7 @@ public class FileImageStore implements ImageStore {
 
 #### 4. **Dependency Injection**
 
-The `Main` class wires up all dependencies:
+The `Main` class wires up all dependencies in the project:
 
 ```java
 SwingImageDisplay imageDisplay = new SwingImageDisplay();
