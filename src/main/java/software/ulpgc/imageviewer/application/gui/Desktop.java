@@ -87,6 +87,11 @@ public class Desktop extends JFrame {
     private void buildUI() {
         setLayout(new BorderLayout());
         
+        // Set up zoom change callback for status bar updates
+        if (imageDisplay instanceof SwingImageDisplay) {
+            ((SwingImageDisplay) imageDisplay).setOnZoomChanged(this::updateStatusBar);
+        }
+        
         add(new CustomTitleBar(this), NORTH);
         add((Component) imageDisplay, CENTER);
         add(createBottomPanel(), SOUTH);
@@ -218,10 +223,20 @@ public class Desktop extends JFrame {
         
         registerShortcut(rootPane, "prev", KeyEvent.VK_LEFT, 0);
         registerShortcut(rootPane, "next", KeyEvent.VK_RIGHT, 0);
+        
+        // Zoom In - Main keyboard and Numpad
         registerShortcut(rootPane, "zoomIn", KeyEvent.VK_PLUS, ActionEvent.CTRL_MASK);
         registerShortcut(rootPane, "zoomIn", KeyEvent.VK_EQUALS, ActionEvent.CTRL_MASK);
+        registerShortcut(rootPane, "zoomIn", KeyEvent.VK_ADD, ActionEvent.CTRL_MASK);
+        
+        // Zoom Out - Main keyboard and Numpad
         registerShortcut(rootPane, "zoomOut", KeyEvent.VK_MINUS, ActionEvent.CTRL_MASK);
+        registerShortcut(rootPane, "zoomOut", KeyEvent.VK_SUBTRACT, ActionEvent.CTRL_MASK);
+        
+        // Reset Zoom - Main keyboard and Numpad
         registerShortcut(rootPane, "resetZoom", KeyEvent.VK_0, ActionEvent.CTRL_MASK);
+        registerShortcut(rootPane, "resetZoom", KeyEvent.VK_NUMPAD0, ActionEvent.CTRL_MASK);
+        
         registerShortcut(rootPane, "load", KeyEvent.VK_O, ActionEvent.CTRL_MASK);
     }
 

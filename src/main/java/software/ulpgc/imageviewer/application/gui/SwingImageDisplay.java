@@ -25,9 +25,14 @@ public class SwingImageDisplay extends JPanel implements ZoomableImageDisplay {
     private int panX = 0;
     private int panY = 0;
     private Point lastDragPoint;
+    private Runnable onZoomChanged;
 
     public SwingImageDisplay() {
         setupMouseListeners();
+    }
+
+    public void setOnZoomChanged(Runnable callback) {
+        this.onZoomChanged = callback;
     }
 
     private void setupMouseListeners() {
@@ -40,6 +45,7 @@ public class SwingImageDisplay extends JPanel implements ZoomableImageDisplay {
                 if (zoomLevel < MAX_ZOOM) {
                     zoomLevel = Math.min(MAX_ZOOM, zoomLevel + WHEEL_ZOOM_STEP);
                     repaint();
+                    if (onZoomChanged != null) onZoomChanged.run();
                 }
             } else {
                 // Scroll down - zoom out
@@ -51,6 +57,7 @@ public class SwingImageDisplay extends JPanel implements ZoomableImageDisplay {
                         panY = 0;
                     }
                     repaint();
+                    if (onZoomChanged != null) onZoomChanged.run();
                 }
             }
         });
