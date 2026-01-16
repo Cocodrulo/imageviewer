@@ -1,0 +1,394 @@
+name: Create Release
+
+on:
+    push:
+        branches:
+            - main
+            - master
+
+jobs:
+    check-version:
+        runs-on: ubuntu-latest
+        outputs:
+            should_release: ${{ steps.check.outputs.should_release }}
+            version: ${{ steps.extract.outputs.version }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 2 # Need at least 2 commits to compare
+
+            - name: Check if pom.xml was modified
+              id: check_pom
+              run: |
+                  # Check if pom.xml was modified in this commit
+                  if git diff --name-only HEAD^ HEAD | grep -q "pom.xml"; then
+                    echo "pom_modified=true" >> $GITHUB_OUTPUT
+                    echo "✅ pom.xml was modified in this commit"
+                  else
+                    echo "pom_modified=false" >> $GITHUB_OUTPUT
+                    echo "ℹ️ pom.xml was not modified"
+                  fi
+
+            - name: Extract current version from pom.xml
+              id: current_version
+              if: steps.check_pom.outputs.pom_modified == 'true'
+              run: |
+                  CURRENT_VERSION=$(grep -oP '(?<=<version>)[^<]+' pom.xml | head -1)
+                  echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+                  echo "Current version in pom.xml: $CURRENT_VERSION"
+
+            - name: Extract previous version from pom.xml
+              id: previous_version
+              if: steps.check_pom.outputs.pom_modified == 'true'
+              run: |
+                  git checkout HEAD^ -- pom.xml 2>/dev/null || echo "No previous version"
+                  PREVIOUS_VERSION=$(grep -oP '(?<=<version>)[^<]+' pom.xml | head -1 || echo "none")
+                  git checkout HEAD -- pom.xml  # Restore current pom.xml
+                  echo "previous=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+                  echo "Previous version in pom.xml: $PREVIOUS_VERSION"
+
+            - name: Check if version changed
+              id: check
+              run: |
+                  POM_MODIFIED="${{ steps.check_pom.outputs.pom_modified }}"
+                  CURRENT="${{ steps.current_version.outputs.current }}"
+                  PREVIOUS="${{ steps.previous_version.outputs.previous }}"
+                  COMMIT_MSG="${{ github.event.head_commit.message }}"
+
+                  # Check if commit message contains "nVersion" OR version changed in pom.xml
+                  if [[ "$COMMIT_MSG" =~ nVersion ]]; then
+                    echo "✅ Commit message contains 'nVersion'"
+                    echo "should_release=true" >> $GITHUB_OUTPUT
+                  elif [[ "$POM_MODIFIED" == "true" && "$CURRENT" != "$PREVIOUS" && -n "$CURRENT" ]]; then
+                    echo "✅ Version changed in pom.xml: $PREVIOUS → $CURRENT"
+                    echo "should_release=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "ℹ️ No release trigger detected"
+                    echo "should_release=false" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Extract version
+              id: extract
+              if: steps.check.outputs.should_release == 'true'
+              run: |
+                  # Use version from pom.xml if available
+                  if [ -n "${{ steps.current_version.outputs.current }}" ]; then
+                    VERSION="${{ steps.current_version.outputs.current }}"
+                  else
+                    # Fallback to extracting from commit message
+                    COMMIT_MSG="${{ github.event.head_commit.message }}"
+                    VERSION=$(echo "$COMMIT_MSG" | grep -oP 'v?\d+\.\d+(\.\d+)?' | head -1)
+                    if [ -z "$VERSION" ]; then
+                      VERSION="$(date +%Y.%m.%d-%H%M%S)"
+                    fi
+                  fi
+                  # Ensure version starts with 'v'
+                  [[ "$VERSION" =~ ^v ]] || VERSION="v$VERSION"
+                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  echo "🏷️ Release version: $VERSION"
+
+    build-jar:
+        needs: check-version
+        if: needs.check-version.outputs.should_release == 'true'
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up JDK 21
+              uses: actions/setup-java@v4
+              with:
+                  java-version: "21"
+                  distribution: "temurin"
+                  cache: maven
+
+            - name: Build with Maven
+              run: mvn clean package -DskipTests
+
+            - name: Rename universal JAR
+              run: |
+                  mkdir -p artifacts
+                  cp target/imageviewer-*-jar-with-dependencies.jar artifacts/imageviewer.jar
+
+            - name: Upload universal JAR
+              uses: actions/upload-artifact@v4
+              with:
+                  name: universal-jar
+                  path: artifacts/imageviewer.jar
+
+    build-windows:
+        needs: check-version
+        if: needs.check-version.outputs.should_release == 'true'
+        runs-on: windows-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up JDK 21
+              uses: actions/setup-java@v4
+              with:
+                  java-version: "21"
+                  distribution: "temurin"
+                  cache: maven
+
+            - name: Build with Maven
+              run: mvn clean package -DskipTests
+
+            - name: Create Windows installers with jpackage
+              shell: pwsh
+              run: |
+                  $jarFile = Get-ChildItem -Path target -Filter "*-jar-with-dependencies.jar" | Select-Object -First 1
+                  $version = "${{ needs.check-version.outputs.version }}".TrimStart('v')
+
+                  # Common jpackage arguments
+                  $commonArgs = @(
+                    "--input", "target",
+                    "--name", "ImageViewer",
+                    "--main-jar", $jarFile.Name,
+                    "--main-class", "software.ulpgc.imageviewer.application.gui.Main",
+                    "--app-version", $version,
+                    "--vendor", "Cocodrulo",
+                    "--description", "Modern image viewer application",
+                    "--win-menu",
+                    "--win-shortcut",
+                    "--dest", "installers"
+                  )
+
+                  # Add icon if exists
+                  if (Test-Path "src/main/resources/icon.ico") {
+                    $commonArgs += "--icon"
+                    $commonArgs += "src/main/resources/icon.ico"
+                  }
+
+                  # Create EXE installer
+                  jpackage @commonArgs --type exe
+
+                  # Create MSI installer
+                  jpackage @commonArgs --type msi
+
+            - name: Upload Windows installers
+              uses: actions/upload-artifact@v4
+              with:
+                  name: windows-installers
+                  path: installers/*
+
+    build-macos:
+        needs: check-version
+        if: needs.check-version.outputs.should_release == 'true'
+        runs-on: macos-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up JDK 21
+              uses: actions/setup-java@v4
+              with:
+                  java-version: "21"
+                  distribution: "temurin"
+                  cache: maven
+
+            - name: Build with Maven
+              run: mvn clean package -DskipTests
+
+            - name: Create macOS installers with jpackage
+              run: |
+                  JAR_FILE=$(find target -name "*-jar-with-dependencies.jar" | head -1)
+                  VERSION="${{ needs.check-version.outputs.version }}"
+                  VERSION="${VERSION#v}"
+
+                  # Add icon if exists
+                  if [ -f "src/main/resources/icon.icns" ]; then
+                    ICON_ARG="--icon src/main/resources/icon.icns"
+                  else
+                    ICON_ARG=""
+                  fi
+
+                  # Create DMG installer
+                  jpackage \
+                    --input target \
+                    --name ImageViewer \
+                    --main-jar $(basename $JAR_FILE) \
+                    --main-class software.ulpgc.imageviewer.application.gui.Main \
+                    --type dmg \
+                    --app-version "$VERSION" \
+                    --vendor "Cocodrulo" \
+                    --description "Modern image viewer application" \
+                    --dest installers \
+                    $ICON_ARG
+
+                  # Create PKG installer
+                  jpackage \
+                    --input target \
+                    --name ImageViewer \
+                    --main-jar $(basename $JAR_FILE) \
+                    --main-class software.ulpgc.imageviewer.application.gui.Main \
+                    --type pkg \
+                    --app-version "$VERSION" \
+                    --vendor "Cocodrulo" \
+                    --description "Modern image viewer application" \
+                    --dest installers \
+                    $ICON_ARG
+
+            - name: Upload macOS installers
+              uses: actions/upload-artifact@v4
+              with:
+                  name: macos-installers
+                  path: installers/*
+
+    build-linux:
+        needs: check-version
+        if: needs.check-version.outputs.should_release == 'true'
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up JDK 21
+              uses: actions/setup-java@v4
+              with:
+                  java-version: "21"
+                  distribution: "temurin"
+                  cache: maven
+
+            - name: Build with Maven
+              run: mvn clean package -DskipTests
+
+            - name: Create Linux installers with jpackage
+              run: |
+                  JAR_FILE=$(find target -name "*-jar-with-dependencies.jar" | head -1)
+                  VERSION="${{ needs.check-version.outputs.version }}"
+                  VERSION="${VERSION#v}"
+
+                  # Add icon if exists
+                  if [ -f "src/main/resources/icon.png" ]; then
+                    ICON_ARG="--icon src/main/resources/icon.png"
+                  else
+                    ICON_ARG=""
+                  fi
+
+                  # Create DEB package
+                  jpackage \
+                    --input target \
+                    --name imageviewer \
+                    --main-jar $(basename $JAR_FILE) \
+                    --main-class software.ulpgc.imageviewer.application.gui.Main \
+                    --type deb \
+                    --app-version "$VERSION" \
+                    --vendor "Cocodrulo" \
+                    --description "Modern image viewer application" \
+                    --dest installers \
+                    $ICON_ARG
+
+                  # Create RPM package
+                  jpackage \
+                    --input target \
+                    --name imageviewer \
+                    --main-jar $(basename $JAR_FILE) \
+                    --main-class software.ulpgc.imageviewer.application.gui.Main \
+                    --type rpm \
+                    --app-version "$VERSION" \
+                    --vendor "Cocodrulo" \
+                    --description "Modern image viewer application" \
+                    --dest installers \
+                    $ICON_ARG
+
+            - name: Upload Linux installers
+              uses: actions/upload-artifact@v4
+              with:
+                  name: linux-installers
+                  path: installers/*
+
+    create-release:
+        needs:
+            [check-version, build-jar, build-windows, build-macos, build-linux]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Download all artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: release-artifacts
+
+            - name: List downloaded artifacts
+              run: |
+                  echo "📦 Downloaded artifacts:"
+                  find release-artifacts -type f
+
+            - name: Generate release notes
+              id: release_notes
+              run: |
+                  # Get the latest tag
+                  LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+                  if [ -z "$LATEST_TAG" ]; then
+                    echo "## 🎉 Initial Release" > RELEASE_NOTES.md
+                    echo "" >> RELEASE_NOTES.md
+                    echo "This is the first release of Image Viewer!" >> RELEASE_NOTES.md
+                    echo "" >> RELEASE_NOTES.md
+                    echo "### 📝 All Commits" >> RELEASE_NOTES.md
+                    git log --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+                  else
+                    echo "## 🚀 What's Changed" > RELEASE_NOTES.md
+                    echo "" >> RELEASE_NOTES.md
+                    echo "### 📝 Commits since $LATEST_TAG" >> RELEASE_NOTES.md
+                    git log $LATEST_TAG..HEAD --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+                  fi
+
+                  echo "" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "## 📦 Downloads" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### Universal JAR (All Platforms)" >> RELEASE_NOTES.md
+                  echo "- **\`imageviewer.jar\`** - Requires Java 21+" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### Windows" >> RELEASE_NOTES.md
+                  echo "- **\`.exe\`** - Windows installer (adds to Start Menu + Desktop shortcut)" >> RELEASE_NOTES.md
+                  echo "- **\`.msi\`** - Windows MSI package (adds to Start Menu + Desktop shortcut)" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### macOS" >> RELEASE_NOTES.md
+                  echo "- **\`.dmg\`** - macOS disk image" >> RELEASE_NOTES.md
+                  echo "- **\`.pkg\`** - macOS package installer" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### Linux" >> RELEASE_NOTES.md
+                  echo "- **\`.deb\`** - Debian/Ubuntu package" >> RELEASE_NOTES.md
+                  echo "- **\`.rpm\`** - Fedora/RHEL package" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "## 🚀 How to Run" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### Universal JAR" >> RELEASE_NOTES.md
+                  echo "\`\`\`bash" >> RELEASE_NOTES.md
+                  echo "java -jar imageviewer.jar" >> RELEASE_NOTES.md
+                  echo "\`\`\`" >> RELEASE_NOTES.md
+                  echo "" >> RELEASE_NOTES.md
+                  echo "### Platform Installers" >> RELEASE_NOTES.md
+                  echo "Download and run the installer for your platform. No Java installation required!" >> RELEASE_NOTES.md
+
+                  cat RELEASE_NOTES.md
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ needs.check-version.outputs.version }}
+                  name: Release ${{ needs.check-version.outputs.version }}
+                  body_path: RELEASE_NOTES.md
+                  draft: false
+                  prerelease: false
+                  files: |
+                      release-artifacts/universal-jar/imageviewer.jar
+                      release-artifacts/windows-installers/*
+                      release-artifacts/macos-installers/*
+                      release-artifacts/linux-installers/*
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
